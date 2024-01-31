@@ -11,10 +11,13 @@ Please click through to the topic you wish to read about.
 ## Documentation
 * 👥 [[Server Groups]]
 * 🎨 [[Formatting]]
+* 📛 [[Nametags]]
 * 📊 [[Sorting]]
 * ✍️ [[Placeholders]]
 * ✨ [[Animations]]
 * 🖼️ [[Custom Logos]]
+* 📦 [[API]]
+    * 📝 [[API Examples]]
 
 ## Links
 * 💻 [GitHub](https://github.com/WiIIiam278/Velocitab)

@@ -19,6 +19,7 @@
 
 package net.william278.velocitab.player;
 
+import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -27,6 +28,7 @@ import java.util.Optional;
 public class Role implements Comparable<Role> {
     public static final int DEFAULT_WEIGHT = 0;
     public static final Role DEFAULT_ROLE = new Role(DEFAULT_WEIGHT, null, null, null, null);
+    @Getter
     private final int weight;
     @Nullable
     private final String name;
@@ -47,7 +49,7 @@ public class Role implements Comparable<Role> {
 
     @Override
     public int compareTo(@NotNull Role o) {
-        return weight - o.weight;
+        return Double.compare(weight, o.weight);
     }
 
     public Optional<String> getName() {
@@ -67,8 +69,8 @@ public class Role implements Comparable<Role> {
     }
 
     @NotNull
-    protected String getWeightString(int highestWeight) {
-        return String.format("%0" + Integer.toString(highestWeight).length() + "d", highestWeight - weight);
+    protected String getWeightString() {
+        return Integer.toString(weight);
     }
 
 }

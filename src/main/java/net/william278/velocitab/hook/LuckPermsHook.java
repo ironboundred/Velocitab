@@ -19,10 +19,12 @@
 
 package net.william278.velocitab.hook;
 
+import com.google.common.collect.Maps;
 import com.velocitypowered.api.proxy.Player;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.cacheddata.CachedMetaData;
+import net.luckperms.api.event.EventSubscription;
 import net.luckperms.api.event.user.UserDataRecalculateEvent;
 import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
@@ -33,20 +35,28 @@ import net.william278.velocitab.tab.PlayerTabList;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 public class LuckPermsHook extends Hook {
 
-    private int highestWeight = Role.DEFAULT_WEIGHT;
     private final LuckPerms api;
+    private final EventSubscription<UserDataRecalculateEvent> event;
+    private final Map<UUID, Long> lastUpdate;
 
     public LuckPermsHook(@NotNull Velocitab plugin) throws IllegalStateException {
         super(plugin);
         this.api = LuckPermsProvider.get();
-        api.getEventBus().subscribe(plugin, UserDataRecalculateEvent.class, this::onLuckPermsGroupUpdate);
+        this.lastUpdate = Maps.newConcurrentMap();
+        this.event = api.getEventBus().subscribe(
+                plugin, UserDataRecalculateEvent.class, this::onLuckPermsGroupUpdate
+        );
+    }
+
+    public void closeEvent() {
+        event.close();
     }
 
     @NotNull
@@ -59,6 +69,7 @@ public class LuckPermsHook extends Hook {
         if (metaData.getPrimaryGroup() == null) {
             return Role.DEFAULT_ROLE;
         }
+
         final Optional<Group> group = getGroup(metaData.getPrimaryGroup());
         return new Role(
                 group.map(this::getGroupWeight).orElse(Role.DEFAULT_WEIGHT),
@@ -69,18 +80,33 @@ public class LuckPermsHook extends Hook {
         );
     }
 
+    @Nullable
+    public String getMeta(@NotNull Player player, @NotNull String key) {
+        return getUser(player.getUniqueId()).getCachedData().getMetaData().getMetaValue(key);
+    }
+
     public void onLuckPermsGroupUpdate(@NotNull UserDataRecalculateEvent event) {
+        // Prevent duplicate events
+        if (lastUpdate.getOrDefault(event.getUser().getUniqueId(), 0L) > System.currentTimeMillis() - 100) {
+            return;
+        }
+        lastUpdate.put(event.getUser().getUniqueId(), System.currentTimeMillis());
+
         final PlayerTabList tabList = plugin.getTabList();
         plugin.getServer().getPlayer(event.getUser().getUniqueId())
                 .ifPresent(player -> plugin.getServer().getScheduler()
                         .buildTask(plugin, () -> {
-                            final TabPlayer updatedPlayer = new TabPlayer(
-                                    player,
-                                    getRoleFromMetadata(event.getData().getMetaData()),
-                                    getHighestWeight()
-                            );
-                            tabList.replacePlayer(updatedPlayer);
-                            tabList.updatePlayer(updatedPlayer);
+                            final Optional<TabPlayer> tabPlayerOptional = tabList.getTabPlayer(player);
+                            if (tabPlayerOptional.isEmpty()) {
+                                return;
+                            }
+
+                            final TabPlayer tabPlayer = tabPlayerOptional.get();
+                            final Role oldRole = tabPlayer.getRole();
+                            tabPlayer.setRole(getRoleFromMetadata(event.getData().getMetaData()));
+                            tabList.updatePlayerDisplayName(tabPlayer);
+                            tabList.getVanishTabList().recalculateVanishForPlayer(tabPlayer);
+                            checkRoleUpdate(tabPlayer, oldRole);
                         })
                         .delay(500, TimeUnit.MILLISECONDS)
                         .schedule());
@@ -99,21 +125,15 @@ public class LuckPermsHook extends Hook {
         return group.getWeight().orElse(Role.DEFAULT_WEIGHT);
     }
 
-    public int getHighestWeight() {
-        if (highestWeight == Role.DEFAULT_WEIGHT) {
-            api.getGroupManager().getLoadedGroups().forEach(group -> {
-                final OptionalInt weight = group.getWeight();
-                if (weight.isPresent() && weight.getAsInt() > highestWeight) {
-                    highestWeight = weight.getAsInt();
-                }
-            });
-        }
-        return highestWeight;
-    }
-
     private User getUser(@NotNull UUID uuid) {
         return api.getUserManager().getUser(uuid);
     }
 
+    private void checkRoleUpdate(@NotNull TabPlayer player, @NotNull Role oldRole) {
+        if (oldRole.equals(player.getRole())) {
+            return;
+        }
+        plugin.getTabList().updatePlayer(player, false);
+    }
 
 }

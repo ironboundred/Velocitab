@@ -26,118 +26,186 @@ import com.velocitypowered.proxy.protocol.ProtocolUtils;
 import io.netty.buffer.ByteBuf;
 import lombok.*;
 import lombok.experimental.Accessors;
-import org.apache.commons.text.StringEscapeUtils;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import net.william278.velocitab.Velocitab;
+import net.william278.velocitab.player.TabPlayer;
+import net.william278.velocitab.tab.Nametag;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Getter
 @Setter
 @ToString
 @AllArgsConstructor
-@NoArgsConstructor
 @EqualsAndHashCode(callSuper = false)
 @Accessors(fluent = true)
+@SuppressWarnings("unused")
 public class UpdateTeamsPacket implements MinecraftPacket {
 
+    private final Velocitab plugin;
     private String teamName;
     private UpdateMode mode;
-    private String displayName;
+    private Component displayName;
     private List<FriendlyFlag> friendlyFlags;
-    private NameTagVisibility nameTagVisibility;
+    private NametagVisibility nametagVisibility;
     private CollisionRule collisionRule;
     private int color;
-    private String prefix;
-    private String suffix;
+    private Component prefix;
+    private Component suffix;
     private List<String> entities;
 
-    @NotNull
-    protected static UpdateTeamsPacket create(@NotNull String teamName, @NotNull String... teamMembers) {
-        return new UpdateTeamsPacket()
-                .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
-                .mode(UpdateMode.CREATE_TEAM)
-                .displayName(getChatString(teamName))
-                .friendlyFlags(List.of(FriendlyFlag.CAN_HURT_FRIENDLY))
-                .nameTagVisibility(NameTagVisibility.ALWAYS)
-                .collisionRule(CollisionRule.ALWAYS)
-                .color(15)
-                .prefix(getChatString(""))
-                .suffix(getChatString(""))
-                .entities(Arrays.asList(teamMembers));
+    public UpdateTeamsPacket(@NotNull Velocitab plugin) {
+        this.plugin = plugin;
     }
 
     @NotNull
-    protected static UpdateTeamsPacket addToTeam(@NotNull String teamName, @NotNull String... teamMembers) {
-        return new UpdateTeamsPacket()
+    protected static UpdateTeamsPacket create(@NotNull Velocitab plugin, @NotNull TabPlayer tabPlayer,
+                                              @NotNull String teamName,
+                                              @NotNull Nametag nametag,
+                                              @NotNull String... teamMembers) {
+        return new UpdateTeamsPacket(plugin)
+                .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
+                .mode(UpdateMode.CREATE_TEAM)
+                .displayName(Component.empty())
+                .friendlyFlags(List.of(FriendlyFlag.CAN_HURT_FRIENDLY))
+                .nametagVisibility(isNametagPresent(nametag, plugin) ? NametagVisibility.ALWAYS : NametagVisibility.NEVER)
+                .collisionRule(CollisionRule.ALWAYS)
+                .color(getLastColor(nametag.prefix(), plugin))
+                .prefix(nametag.getPrefixComponent(plugin, tabPlayer))
+                .suffix(nametag.getSuffixComponent(plugin, tabPlayer))
+                .entities(Arrays.asList(teamMembers));
+    }
+
+    private static boolean isNametagPresent(@NotNull Nametag nametag, @NotNull Velocitab plugin) {
+        if (!plugin.getSettings().isRemoveNametags()) {
+            return true;
+        }
+
+        return !nametag.prefix().isEmpty() || !nametag.suffix().isEmpty();
+    }
+
+    @NotNull
+    protected static UpdateTeamsPacket changeNametag(@NotNull Velocitab plugin, @NotNull TabPlayer tabPlayer,
+                                                     @NotNull String teamName,
+                                                     @NotNull Nametag nametag) {
+        return new UpdateTeamsPacket(plugin)
+                .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
+                .mode(UpdateMode.UPDATE_INFO)
+                .displayName(Component.empty())
+                .friendlyFlags(List.of(FriendlyFlag.CAN_HURT_FRIENDLY))
+                .nametagVisibility(isNametagPresent(nametag, plugin) ? NametagVisibility.ALWAYS : NametagVisibility.NEVER)
+                .collisionRule(CollisionRule.ALWAYS)
+                .color(getLastColor(nametag.prefix(), plugin))
+                .prefix(nametag.getPrefixComponent(plugin, tabPlayer))
+                .suffix(nametag.getSuffixComponent(plugin, tabPlayer));
+    }
+
+    @NotNull
+    protected static UpdateTeamsPacket addToTeam(@NotNull Velocitab plugin, @NotNull String teamName,
+                                                 @NotNull String... teamMembers) {
+        return new UpdateTeamsPacket(plugin)
                 .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
                 .mode(UpdateMode.ADD_PLAYERS)
                 .entities(Arrays.asList(teamMembers));
     }
 
     @NotNull
-    protected static UpdateTeamsPacket removeFromTeam(@NotNull String teamName, @NotNull String... teamMembers) {
-        return new UpdateTeamsPacket()
+    protected static UpdateTeamsPacket removeFromTeam(@NotNull Velocitab plugin, @NotNull String teamName,
+                                                      @NotNull String... teamMembers) {
+        return new UpdateTeamsPacket(plugin)
                 .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
                 .mode(UpdateMode.REMOVE_PLAYERS)
                 .entities(Arrays.asList(teamMembers));
     }
 
     @NotNull
-    private static String getChatString(@NotNull String string) {
-        return "{\"text\":\"" + StringEscapeUtils.escapeJson(string) + "\"}";
+    protected static UpdateTeamsPacket removeTeam(@NotNull Velocitab plugin, @NotNull String teamName) {
+        return new UpdateTeamsPacket(plugin)
+                .teamName(teamName.length() > 16 ? teamName.substring(0, 16) : teamName)
+                .mode(UpdateMode.REMOVE_TEAM);
+    }
+
+    public static int getLastColor(@Nullable String text, @NotNull Velocitab plugin) {
+        if (text == null) {
+            return 15;
+        }
+
+        //add 1 random char at the end to make sure the last color is always found
+        text = text + "z";
+
+        //serialize & deserialize to downsample rgb to legacy
+        Component component = plugin.getFormatter().emptyFormat(text);
+        text = LegacyComponentSerializer.legacyAmpersand().serialize(component);
+
+        int lastFormatIndex = text.lastIndexOf("&");
+        if (lastFormatIndex == -1 || lastFormatIndex == text.length() - 1) {
+            return 15;
+        }
+
+        final String last = text.substring(lastFormatIndex, lastFormatIndex + 2);
+        return TeamColor.getColorId(last.charAt(1));
+    }
+
+    //Style-codes are handled as white
+    public enum TeamColor {
+        BLACK('0', 0),
+        DARK_BLUE('1', 1),
+        DARK_GREEN('2', 2),
+        DARK_AQUA('3', 3),
+        DARK_RED('4', 4),
+        DARK_PURPLE('5', 5),
+        GOLD('6', 6),
+        GRAY('7', 7),
+        DARK_GRAY('8', 8),
+        BLUE('9', 9),
+        GREEN('a', 10),
+        AQUA('b', 11),
+        RED('c', 12),
+        LIGHT_PURPLE('d', 13),
+        YELLOW('e', 14),
+        WHITE('f', 15),
+        OBFUSCATED('k', 16),
+        BOLD('f', 17),
+        STRIKETHROUGH('f', 18),
+        UNDERLINED('f', 19),
+        ITALIC('f', 20),
+        RESET('r', 21);
+
+        private final char colorChar;
+        private final int id;
+
+        TeamColor(char colorChar, int id) {
+            this.colorChar = colorChar;
+            this.id = id;
+        }
+
+        public static int getColorId(char var) {
+            return Arrays.stream(values())
+                    .filter(color -> color.colorChar == var)
+                    .map(c -> c.id).findFirst()
+                    .orElse(15);
+        }
     }
 
     @Override
     public void decode(ByteBuf byteBuf, ProtocolUtils.Direction direction, ProtocolVersion protocolVersion) {
-        teamName = ProtocolUtils.readString(byteBuf);
-        mode = UpdateMode.byId(byteBuf.readByte());
-        if (mode == UpdateMode.REMOVE_TEAM) {
-            return;
-        }
-        if (mode == UpdateMode.CREATE_TEAM || mode == UpdateMode.UPDATE_INFO) {
-            displayName = ProtocolUtils.readString(byteBuf);
-            friendlyFlags = FriendlyFlag.fromBitMask(byteBuf.readByte());
-            nameTagVisibility = NameTagVisibility.byId(ProtocolUtils.readString(byteBuf));
-            collisionRule = CollisionRule.byId(ProtocolUtils.readString(byteBuf));
-            color = byteBuf.readByte();
-            prefix = ProtocolUtils.readString(byteBuf);
-            suffix = ProtocolUtils.readString(byteBuf);
-        }
-        if (mode == UpdateMode.CREATE_TEAM || mode == UpdateMode.ADD_PLAYERS || mode == UpdateMode.REMOVE_PLAYERS) {
-            int entityCount = ProtocolUtils.readVarInt(byteBuf);
-            entities = new ArrayList<>(entityCount);
-            for (int j = 0; j < entityCount; j++) {
-                entities.add(ProtocolUtils.readString(byteBuf));
-            }
-        }
+        throw new UnsupportedOperationException("Operation not supported");
     }
 
     @Override
     public void encode(ByteBuf byteBuf, ProtocolUtils.Direction direction, ProtocolVersion protocolVersion) {
-        ProtocolUtils.writeString(byteBuf, teamName);
-        byteBuf.writeByte(mode.id());
-        if (mode == UpdateMode.REMOVE_TEAM) {
+        final Optional<ScoreboardManager> optionalManager = plugin.getScoreboardManager();
+
+        if (optionalManager.isEmpty()) {
             return;
         }
-        if (mode == UpdateMode.CREATE_TEAM || mode == UpdateMode.UPDATE_INFO) {
-            ProtocolUtils.writeString(byteBuf, displayName);
-            byteBuf.writeByte(FriendlyFlag.toBitMask(friendlyFlags));
-            ProtocolUtils.writeString(byteBuf, nameTagVisibility.id());
-            ProtocolUtils.writeString(byteBuf, collisionRule.id());
-            byteBuf.writeByte(color);
-            ProtocolUtils.writeString(byteBuf, prefix);
-            ProtocolUtils.writeString(byteBuf, suffix);
-        }
-        if (mode == UpdateMode.CREATE_TEAM || mode == UpdateMode.ADD_PLAYERS || mode == UpdateMode.REMOVE_PLAYERS) {
-            ProtocolUtils.writeVarInt(byteBuf, entities != null ? entities.size() : 0);
-            for (String entity : entities != null ? entities : new ArrayList<String>()) {
-                ProtocolUtils.writeString(byteBuf, entity);
-            }
-        }
+        optionalManager.get().getPacketAdapter(protocolVersion).encode(byteBuf, this, protocolVersion);
     }
 
     @Override
@@ -162,6 +230,7 @@ public class UpdateTeamsPacket implements MinecraftPacket {
             return id;
         }
 
+        @Nullable
         public static UpdateMode byId(byte id) {
             return Arrays.stream(values())
                     .filter(mode -> mode.id == id)
@@ -196,7 +265,7 @@ public class UpdateTeamsPacket implements MinecraftPacket {
         }
     }
 
-    public enum NameTagVisibility {
+    public enum NametagVisibility {
         ALWAYS("always"),
         NEVER("never"),
         HIDE_FOR_OTHER_TEAMS("hideForOtherTeams"),
@@ -204,7 +273,7 @@ public class UpdateTeamsPacket implements MinecraftPacket {
 
         private final String id;
 
-        NameTagVisibility(@NotNull String id) {
+        NametagVisibility(@NotNull String id) {
             this.id = id;
         }
 
@@ -214,7 +283,7 @@ public class UpdateTeamsPacket implements MinecraftPacket {
         }
 
         @NotNull
-        public static NameTagVisibility byId(@Nullable String id) {
+        public static NametagVisibility byId(@Nullable String id) {
             return id == null ? ALWAYS : Arrays.stream(values())
                     .filter(visibility -> visibility.id.equals(id))
                     .findFirst()

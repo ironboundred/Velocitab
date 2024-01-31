@@ -20,39 +20,52 @@
 package net.william278.velocitab.player;
 
 import com.velocitypowered.api.proxy.Player;
+import lombok.Getter;
+import lombok.Setter;
 import net.kyori.adventure.text.Component;
 import net.william278.velocitab.Velocitab;
+import net.william278.velocitab.config.Group;
 import net.william278.velocitab.config.Placeholder;
+import net.william278.velocitab.tab.Nametag;
 import net.william278.velocitab.tab.PlayerTabList;
+import org.apache.commons.lang3.ObjectUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
-import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BiFunction;
-import java.util.stream.Collectors;
 
+@Getter
 public final class TabPlayer implements Comparable<TabPlayer> {
+
     private final Player player;
-    private final Role role;
-    private final int highestWeight;
+    @Setter
+    private Role role;
     private int headerIndex = 0;
     private int footerIndex = 0;
+    private Component lastDisplayName;
+    private String teamName;
+    @Nullable
+    @Setter
+    private String customName;
+    @Nullable
+    @Setter
+    private String lastServer;
+    @NotNull
+    @Setter
+    private Group group;
+    @Setter
+    private boolean loaded;
 
-    public TabPlayer(@NotNull Player player, @NotNull Role role, int highestWeight) {
+    public TabPlayer(@NotNull Player player, @NotNull Role role, @NotNull Group group) {
         this.player = player;
         this.role = role;
-        this.highestWeight = highestWeight;
+        this.group = group;
     }
 
     @NotNull
-    public Player getPlayer() {
-        return player;
-    }
-
-    @NotNull
-    public Role getRole() {
-        return role;
+    public String getRoleWeightString() {
+        return getRole().getWeightString();
     }
 
     /**
@@ -65,17 +78,17 @@ public final class TabPlayer implements Comparable<TabPlayer> {
     public String getServerName() {
         return player.getCurrentServer()
                 .map(serverConnection -> serverConnection.getServerInfo().getName())
-                .orElse("unknown");
+                .orElse(ObjectUtils.firstNonNull(lastServer, "unknown"));
     }
 
     /**
-     * Get the TAB server group this player is connected to
+     * Get the ordinal position of the TAB server group this player is connected to
+     *
      * @param plugin instance of the {@link Velocitab} plugin
-     * @return the name of the server group the player is on
+     * @return The ordinal position of the server group
      */
-    @NotNull
-    public String getServerGroup(@NotNull Velocitab plugin) {
-        return plugin.getSettings().getServerGroup(this.getServerName());
+    public int getServerGroupPosition(@NotNull Velocitab plugin) {
+        return plugin.getTabGroups().getPosition(group);
     }
 
     /**
@@ -92,44 +105,57 @@ public final class TabPlayer implements Comparable<TabPlayer> {
 
     @NotNull
     public CompletableFuture<Component> getDisplayName(@NotNull Velocitab plugin) {
-        final String serverGroup = plugin.getSettings().getServerGroup(getServerName());
-        return Placeholder.replace(plugin.getSettings().getFormat(serverGroup), plugin, this)
-                .thenApply(formatted -> plugin.getFormatter().format(formatted, this, plugin));
-
+        return Placeholder.replace(group.format(), plugin, this)
+                .thenApply(formatted -> plugin.getFormatter().format(formatted, this, plugin))
+                .thenApply(c -> this.lastDisplayName = c);
     }
 
     @NotNull
-    public String getTeamName(@NotNull Velocitab plugin) {
-        return plugin.getSettings().getSortingElementList().stream()
-                .map(element -> element.resolve(this, plugin))
-                .collect(Collectors.joining("-"));
+    public CompletableFuture<Nametag> getNametag(@NotNull Velocitab plugin) {
+        return Placeholder.replace(group.nametag(), plugin, this);
     }
 
-    public void sendHeaderAndFooter(@NotNull PlayerTabList tabList) {
-        tabList.getHeader(this).thenAccept(header -> tabList.getFooter(this)
+    @NotNull
+    public CompletableFuture<String> getTeamName(@NotNull Velocitab plugin) {
+        return plugin.getSortingManager().getTeamName(this)
+                .thenApply(teamName -> this.teamName = teamName);
+    }
+
+    public Optional<String> getLastTeamName() {
+        return Optional.ofNullable(teamName);
+    }
+
+    public CompletableFuture<Void> sendHeaderAndFooter(@NotNull PlayerTabList tabList) {
+        return tabList.getHeader(this).thenCompose(header -> tabList.getFooter(this)
                 .thenAccept(footer -> player.sendPlayerListHeaderAndFooter(header, footer)));
     }
 
-    public int getHeaderIndex() {
-        return headerIndex;
+    public void incrementIndexes() {
+        incrementHeaderIndex();
+        incrementFooterIndex();
     }
 
-    public void incrementHeaderIndex(@NotNull Velocitab plugin) {
+    public void incrementHeaderIndex() {
         headerIndex++;
-        if (headerIndex >= plugin.getSettings().getHeaderListSize(getServerGroup(plugin))) {
+        if (headerIndex >= group.headers().size()) {
             headerIndex = 0;
         }
     }
 
-    public int getFooterIndex() {
-        return footerIndex;
-    }
-
-    public void incrementFooterIndex(@NotNull Velocitab plugin) {
+    public void incrementFooterIndex() {
         footerIndex++;
-        if (footerIndex >= plugin.getSettings().getFooterListSize(getServerGroup(plugin))) {
+        if (footerIndex >= group.footers().size()) {
             footerIndex = 0;
         }
+    }
+
+    /**
+     * Returns the custom name of the TabPlayer, if it has been set.
+     *
+     * @return An Optional object containing the custom name, or empty if no custom name has been set.
+     */
+    public Optional<String> getCustomName() {
+        return Optional.ofNullable(customName);
     }
 
     @Override
@@ -146,31 +172,18 @@ public final class TabPlayer implements Comparable<TabPlayer> {
         return obj instanceof TabPlayer other && player.getUniqueId().equals(other.player.getUniqueId());
     }
 
-    /**
-     * Elements for sorting players
-     */
-    @SuppressWarnings("unused")
-    public enum SortableElement {
-        ROLE_WEIGHT((player, plugin) -> player.getRole().getWeightString(player.highestWeight)),
-        ROLE_NAME((player, plugin) -> player.getRole().getName()
-                .map(name -> name.length() > 3 ? name.substring(0, 3) : name)
-                .orElse("")),
-        SERVER_NAME((player, plugin) -> player.getServerName());
-
-        private final BiFunction<TabPlayer, Velocitab, String> elementResolver;
-
-        SortableElement(@NotNull BiFunction<TabPlayer, Velocitab, String> elementResolver) {
-            this.elementResolver = elementResolver;
-        }
-
-        @NotNull
-        private String resolve(@NotNull TabPlayer tabPlayer, @NotNull Velocitab plugin) {
-            return elementResolver.apply(tabPlayer, plugin);
-        }
-
-        public static Optional<SortableElement> parse(@NotNull String s) {
-            return Arrays.stream(values()).filter(element -> element.name().equalsIgnoreCase(s)).findFirst();
-        }
+    @Override
+    public String toString() {
+        return "TabPlayer{" +
+                "player=" + player +
+                ", role=" + role +
+                ", headerIndex=" + headerIndex +
+                ", footerIndex=" + footerIndex +
+                ", lastDisplayname=" + lastDisplayName +
+                ", teamName='" + teamName + '\'' +
+                ", lastServer='" + lastServer + '\'' +
+                ", group=" + group.name() +
+                ", loaded=" + loaded +
+                '}';
     }
-
 }

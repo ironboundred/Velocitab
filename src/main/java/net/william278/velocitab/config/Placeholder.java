@@ -23,12 +23,18 @@ import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import net.william278.velocitab.Velocitab;
 import net.william278.velocitab.player.TabPlayer;
+import net.william278.velocitab.tab.Nametag;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.function.TriFunction;
 import org.jetbrains.annotations.NotNull;
+import org.slf4j.event.Level;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public enum Placeholder {
 
@@ -41,33 +47,88 @@ public enum Placeholder {
             .orElse("")),
     CURRENT_DATE((plugin, player) -> DateTimeFormatter.ofPattern("dd MMM yyyy").format(LocalDateTime.now())),
     CURRENT_TIME((plugin, player) -> DateTimeFormatter.ofPattern("HH:mm:ss").format(LocalDateTime.now())),
-    USERNAME((plugin, player) -> plugin.getFormatter().escape(player.getPlayer().getUsername())),
+    USERNAME((plugin, player) -> player.getCustomName().orElse(player.getPlayer().getUsername())),
+    USERNAME_LOWER((plugin, player) -> player.getCustomName().orElse(player.getPlayer().getUsername()).toLowerCase()),
     SERVER((plugin, player) -> player.getServerDisplayName(plugin)),
     PING((plugin, player) -> Long.toString(player.getPlayer().getPing())),
     PREFIX((plugin, player) -> player.getRole().getPrefix().orElse("")),
     SUFFIX((plugin, player) -> player.getRole().getSuffix().orElse("")),
     ROLE((plugin, player) -> player.getRole().getName().orElse("")),
     ROLE_DISPLAY_NAME((plugin, player) -> player.getRole().getDisplayName().orElse("")),
-    DEBUG_TEAM_NAME((plugin, player) -> plugin.getFormatter().escape(player.getTeamName(plugin)));
+    ROLE_WEIGHT((plugin, player) -> player.getRoleWeightString()),
+    SERVER_GROUP((plugin, player) -> player.getGroup().name()),
+    SERVER_GROUP_INDEX((plugin, player) -> Integer.toString(player.getServerGroupPosition(plugin))),
+    DEBUG_TEAM_NAME((plugin, player) -> plugin.getFormatter().escape(player.getLastTeamName().orElse(""))),
+    LUCKPERMS_META_((param, plugin, player) -> plugin.getLuckPermsHook()
+            .map(hook -> hook.getMeta(player.getPlayer(), param))
+            .orElse(""));
 
     /**
      * Function to replace placeholders with a real value
      */
-    private final BiFunction<Velocitab, TabPlayer, String> replacer;
+    private final TriFunction<String, Velocitab, TabPlayer, String> replacer;
+    private final boolean parameterised;
+    private final Pattern pattern;
+    private final static Pattern checkPlaceholders = Pattern.compile("%.*?%");
+    private final static String DELIMITER = ":::";
 
     Placeholder(@NotNull BiFunction<Velocitab, TabPlayer, String> replacer) {
-        this.replacer = replacer;
+        this.parameterised = false;
+        this.replacer = (text, player, plugin) -> replacer.apply(player, plugin);
+        this.pattern = Pattern.compile("%" + this.name().toLowerCase() + "%");
     }
 
-    public static CompletableFuture<String> replace(@NotNull String format, @NotNull Velocitab plugin, @NotNull TabPlayer player) {
+    Placeholder(@NotNull TriFunction<String, Velocitab, TabPlayer, String> parameterisedReplacer) {
+        this.parameterised = true;
+        this.replacer = parameterisedReplacer;
+        this.pattern = Pattern.compile("%" + this.name().toLowerCase() + "[^%]+%", Pattern.CASE_INSENSITIVE);
+    }
+
+    public static CompletableFuture<Nametag> replace(@NotNull Nametag nametag, @NotNull Velocitab plugin,
+                                                     @NotNull TabPlayer player) {
+        return replace(nametag.prefix() + DELIMITER + nametag.suffix(), plugin, player)
+                .thenApply(s -> s.split(DELIMITER, 2))
+                .thenApply(v -> new Nametag(v[0], v.length > 1 ? v[1] : ""));
+    }
+
+    public static CompletableFuture<String> replace(@NotNull String format, @NotNull Velocitab plugin,
+                                                    @NotNull TabPlayer player) {
+
+        if (format.equals(DELIMITER)) {
+            return CompletableFuture.completedFuture("");
+        }
+
         for (Placeholder placeholder : values()) {
-            format = format.replace("%" + placeholder.name().toLowerCase() + "%", placeholder.replacer.apply(plugin, player));
+            Matcher matcher = placeholder.pattern.matcher(format);
+            if (placeholder.parameterised) {
+                // Replace the placeholder with the result of the replacer function with the parameter
+                format = matcher.replaceAll(matchResult ->
+                        Matcher.quoteReplacement(
+                                placeholder.replacer.apply(StringUtils.chop(matchResult.group().replace("%" + placeholder.name().toLowerCase(), ""))
+                                        , plugin, player)
+                        ));
+            } else {
+                // Replace the placeholder with the result of the replacer function
+                format = matcher.replaceAll(matchResult -> Matcher.quoteReplacement(placeholder.replacer.apply(null, plugin, player)));
+            }
+
         }
         final String replaced = format;
 
-        return plugin.getPAPIProxyBridgeHook()
-                .map(hook -> hook.formatPlaceholders(replaced, player.getPlayer()))
-                .orElse(CompletableFuture.completedFuture(replaced));
-    }
+        if (!checkPlaceholders.matcher(replaced).find()) {
+            return CompletableFuture.completedFuture(replaced);
+        }
 
+        return plugin.getPAPIProxyBridgeHook()
+                .map(hook -> hook.formatPlaceholders(replaced, player.getPlayer())
+                        .exceptionally(e -> {
+                            plugin.log(Level.ERROR, "An error occurred whilst parsing placeholders: " + e.getMessage());
+                            return replaced;
+                        })
+                )
+                .orElse(CompletableFuture.completedFuture(replaced)).exceptionally(e -> {
+                    plugin.log(Level.ERROR, "An error occurred whilst parsing placeholders: " + e.getMessage());
+                    return replaced;
+                });
+    }
 }

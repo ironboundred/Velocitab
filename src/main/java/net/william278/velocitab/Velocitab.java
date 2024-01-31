@@ -23,82 +23,99 @@ import com.google.inject.Inject;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.PluginContainer;
 import com.velocitypowered.api.plugin.PluginDescription;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
-import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
-import net.william278.annotaml.Annotaml;
+import com.velocitypowered.api.scheduler.ScheduledTask;
+import lombok.Getter;
+import lombok.Setter;
 import net.william278.desertwell.util.UpdateChecker;
 import net.william278.desertwell.util.Version;
+import net.william278.velocitab.api.VelocitabAPI;
 import net.william278.velocitab.commands.VelocitabCommand;
+import net.william278.velocitab.config.ConfigProvider;
 import net.william278.velocitab.config.Formatter;
 import net.william278.velocitab.config.Settings;
+import net.william278.velocitab.config.TabGroups;
 import net.william278.velocitab.hook.Hook;
 import net.william278.velocitab.hook.LuckPermsHook;
-import net.william278.velocitab.hook.MiniPlaceholdersHook;
-import net.william278.velocitab.hook.PAPIProxyBridgeHook;
+import net.william278.velocitab.packet.PacketEventManager;
 import net.william278.velocitab.packet.ScoreboardManager;
-import net.william278.velocitab.player.Role;
-import net.william278.velocitab.player.TabPlayer;
+import net.william278.velocitab.providers.HookProvider;
+import net.william278.velocitab.providers.LoggerProvider;
+import net.william278.velocitab.providers.MetricProvider;
+import net.william278.velocitab.providers.ScoreboardProvider;
+import net.william278.velocitab.sorting.SortingManager;
 import net.william278.velocitab.tab.PlayerTabList;
-import org.bstats.charts.SimplePie;
+import net.william278.velocitab.vanish.VanishManager;
 import org.bstats.velocity.Metrics;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.event.Level;
 
-import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
 @Plugin(id = "velocitab")
-public class Velocitab {
-    private static final int METRICS_ID = 18247;
+@Getter
+public class Velocitab implements ConfigProvider, ScoreboardProvider, LoggerProvider, HookProvider, MetricProvider {
+
+    @Setter
     private Settings settings;
+    @Setter
+    private TabGroups tabGroups;
+
     private final ProxyServer server;
     private final Logger logger;
-    private final Path dataDirectory;
+    private final Path configDirectory;
     @Inject
     private PluginContainer pluginContainer;
     @Inject
     private Metrics.Factory metricsFactory;
+    @Setter
     private PlayerTabList tabList;
+    @Setter
     private List<Hook> hooks;
+    @Setter
     private ScoreboardManager scoreboardManager;
+    @Setter
+    private SortingManager sortingManager;
+    private VanishManager vanishManager;
+    private PacketEventManager packetEventManager;
 
     @Inject
-    public Velocitab(@NotNull ProxyServer server, @NotNull Logger logger, @DataDirectory Path dataDirectory) {
+    public Velocitab(@NotNull ProxyServer server, @NotNull Logger logger, @DataDirectory Path configDirectory) {
         this.server = server;
         this.logger = logger;
-        this.dataDirectory = dataDirectory;
+        this.configDirectory = configDirectory;
     }
 
     @Subscribe
     public void onProxyInitialization(@NotNull ProxyInitializeEvent event) {
-        loadSettings();
+        checkCompatibility();
+        loadConfigs();
         loadHooks();
-        prepareScoreboardManager();
-        prepareTabList();
+        prepareVanishManager();
+        prepareChannelManager();
+        prepareScoreboard();
         registerCommands();
         registerMetrics();
         checkForUpdates();
+        prepareAPI();
         logger.info("Successfully enabled Velocitab");
     }
 
-    @NotNull
-    public ProxyServer getServer() {
-        return server;
-    }
-
-    @NotNull
-    public Settings getSettings() {
-        return settings;
+    @Subscribe
+    public void onProxyShutdown(@NotNull ProxyShutdownEvent event) {
+        server.getScheduler().tasksByPlugin(this).forEach(ScheduledTask::cancel);
+        disableScoreboardManager();
+        getLuckPermsHook().ifPresent(LuckPermsHook::closeEvent);
+        VelocitabAPI.unregister();
+        logger.info("Successfully disabled Velocitab");
     }
 
     @NotNull
@@ -106,46 +123,22 @@ public class Velocitab {
         return getSettings().getFormatter();
     }
 
-    public void loadSettings() {
-        try {
-            settings = Annotaml.create(
-                    new File(dataDirectory.toFile(), "config.yml"),
-                    new Settings(this)
-            ).get();
-        } catch (IOException | InvocationTargetException | InstantiationException | IllegalAccessException e) {
-            logger.error("Failed to load config file: " + e.getMessage(), e);
-        }
+    public void loadConfigs() {
+        loadSettings();
+        loadTabGroups();
     }
 
-    private <H extends Hook> Optional<H> getHook(@NotNull Class<H> hookType) {
-        return hooks.stream()
-                .filter(hook -> hook.getClass().equals(hookType))
-                .map(hookType::cast)
-                .findFirst();
+    private void prepareVanishManager() {
+        this.vanishManager = new VanishManager(this);
     }
 
-    public Optional<LuckPermsHook> getLuckPermsHook() {
-        return getHook(LuckPermsHook.class);
+    private void prepareChannelManager() {
+        this.packetEventManager = new PacketEventManager(this);
     }
 
-    public Optional<PAPIProxyBridgeHook> getPAPIProxyBridgeHook() {
-        return getHook(PAPIProxyBridgeHook.class);
-    }
-
-    public Optional<MiniPlaceholdersHook> getMiniPlaceholdersHook() {
-        return getHook(MiniPlaceholdersHook.class);
-    }
-
-    private void loadHooks() {
-        this.hooks = new ArrayList<>();
-        Hook.AVAILABLE.forEach(availableHook -> availableHook.apply(this).ifPresent(hooks::add));
-    }
-
-    private void prepareScoreboardManager() {
-        if (settings.isSortPlayers()) {
-            this.scoreboardManager = new ScoreboardManager(this);
-            scoreboardManager.registerPacket();
-        }
+    @Override
+    public Velocitab getPlugin() {
+        return this;
     }
 
     @NotNull
@@ -153,22 +146,8 @@ public class Velocitab {
         return Optional.ofNullable(scoreboardManager);
     }
 
-    @NotNull
-    public PlayerTabList getTabList() {
-        return tabList;
-    }
-
-    private void prepareTabList() {
-        this.tabList = new PlayerTabList(this);
-        server.getEventManager().register(this, tabList);
-    }
-
-    @NotNull
-    public TabPlayer getTabPlayer(@NotNull Player player) {
-        return new TabPlayer(player,
-                getLuckPermsHook().map(hook -> hook.getPlayerRole(player)).orElse(Role.DEFAULT_ROLE),
-                getLuckPermsHook().map(LuckPermsHook::getHighestWeight).orElse(0)
-        );
+    private void prepareAPI() {
+        VelocitabAPI.register(this);
     }
 
     private void registerCommands() {
@@ -185,18 +164,13 @@ public class Velocitab {
     }
 
     @NotNull
-    public Version getVersion() {
-        return Version.fromString(getDescription().getVersion().orElseThrow(), "-");
+    public Version getVelocityVersion() {
+        return Version.fromString(server.getVersion().getVersion(), "-");
     }
 
-    private void registerMetrics() {
-        final Metrics metrics = metricsFactory.make(this, METRICS_ID);
-        metrics.addCustomChart(new SimplePie("sort_players", () -> settings.isSortPlayers() ? "Enabled" : "Disabled"));
-        metrics.addCustomChart(new SimplePie("formatter_type", () -> settings.getFormatter().getName()));
-        metrics.addCustomChart(new SimplePie("using_luckperms", () -> getLuckPermsHook().isPresent() ? "Yes" : "No"));
-        metrics.addCustomChart(new SimplePie("using_papiproxybridge", () -> getPAPIProxyBridgeHook().isPresent() ? "Yes" : "No"));
-        metrics.addCustomChart(new SimplePie("using_miniplaceholders", () -> getMiniPlaceholdersHook().isPresent() ? "Yes" : "No"));
-
+    @NotNull
+    public Version getVersion() {
+        return Version.fromString(getDescription().getVersion().orElseThrow(), "-");
     }
 
     private void checkForUpdates() {
@@ -217,30 +191,6 @@ public class Velocitab {
                 .endpoint(UpdateChecker.Endpoint.MODRINTH)
                 .resource("velocitab")
                 .build();
-    }
-
-    public void log(@NotNull Level level, @NotNull String message, @NotNull Throwable... exceptions) {
-        switch (level) {
-            case ERROR -> {
-                if (exceptions.length > 0) {
-                    logger.error(message, exceptions[0]);
-                } else {
-                    logger.error(message);
-                }
-            }
-            case WARN -> {
-                if (exceptions.length > 0) {
-                    logger.warn(message, exceptions[0]);
-                } else {
-                    logger.warn(message);
-                }
-            }
-            case INFO -> logger.info(message);
-        }
-    }
-
-    public void log(@NotNull String message) {
-        this.log(Level.INFO, message);
     }
 
 }

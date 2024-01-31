@@ -1,0 +1,101 @@
+# Publishes a release to Modrinth and Hangar when a release is published on GitHub.
+name: Release Test & Publish
+
+on:
+  release:
+    types: [ published ]
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout for CI 🛎️'
+        uses: actions/checkout@v4
+      - name: 'Set up JDK 17 📦'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: 'Build with Gradle 🏗️'
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: build publish
+        env:
+          RELEASES_MAVEN_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          RELEASES_MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
+      - name: 'Publish to Modrinth & Hangar 🚰'
+        uses: WiIIiam278/mc-publish@hangar
+        with:
+          modrinth-id: Q10irTG0
+          modrinth-featured: true
+          modrinth-token: ${{ secrets.MODRINTH_TOKEN }}
+          modrinth-version-type: release
+          hangar-id: William278/Velocitab
+          hangar-token: ${{ secrets.HANGAR_API_KEY }}
+          hangar-version-type: Release
+          hangar-game-versions: |
+            3.3
+          files: target/Velocitab-*.jar
+          name: Velocitab v${{ github.event.release.tag_name }}
+          version: ${{ github.event.release.tag_name }}
+          changelog: ${{ github.event.release.body }}
+          loaders: |
+            velocity
+          dependencies: |
+            luckperms | suggests | *
+            papiproxybridge | suggests | *
+            miniplaceholders | suggests | *
+          game-versions: |
+            1.8
+            1.8.1
+            1.8.2
+            1.8.3
+            1.8.4
+            1.8.5
+            1.8.6
+            1.8.7
+            1.8.8
+            1.8.9
+            1.12.2
+            1.13
+            1.13.1
+            1.13.2
+            1.14
+            1.14.1
+            1.14.2
+            1.14.3
+            1.14.4
+            1.15
+            1.15.1
+            1.15.2
+            1.16
+            1.16.1
+            1.16.2
+            1.16.3
+            1.16.4
+            1.16.5
+            1.17
+            1.17.1
+            1.18
+            1.18.1
+            1.18.2
+            1.19
+            1.19.1
+            1.19.2
+            1.19.3
+            1.19.4
+            1.20
+            1.20.1
+            1.20.2
+            1.20.3
+            1.20.4
+          java: 17
+      - name: 'Upload GitHub Artifacts 📦'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Velocitab
+          path: target/Velocitab-*.jar
